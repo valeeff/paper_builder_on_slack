@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Autonomous Slack Designer
+Paper Builder on Slack
 =========================
 The receptionist: bridges Slack mentions → Claude CLI (with Paper MCP) → Slack screenshots.
 
@@ -765,7 +765,7 @@ async def handle_mention(event: dict, say, client):
 
 async def main():
     handler = AsyncSocketModeHandler(app, SLACK_APP_TOKEN)
-    logger.info("Autonomous Slack Designer is running (Socket Mode).")
+    logger.info("Paper Builder on Slack is running (Socket Mode).")
     logger.info("Using claude binary: %s", CLAUDE_BIN)
     await handler.start_async()
 

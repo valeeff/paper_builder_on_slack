@@ -1,4 +1,4 @@
-# Autonomous Slack Designer — Architecture
+# Paper Builder on Slack — Architecture
 
 A Python server that listens for Slack mentions and autonomously designs or deploys UIs using Claude and Paper.
 
