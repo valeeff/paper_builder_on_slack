@@ -53,6 +53,76 @@ def _claude_env() -> dict:
         env["ANTHROPIC_API_KEY"] = ANTHROPIC_API_KEY
     return env
 
+# ── Design system preferences ─────────────────────────────────────────────────
+
+# Persistent per-channel choice when both folder and artboard are present.
+# Stored as { channel_id: "folder" | "artboard" }
+_DS_CHOICES_FILE = os.path.join(PROJECT_ROOT, ".design_system_choices.json")
+
+# In-memory map: channel_id -> timestamp (float) of the bot's question.
+# Present means we're waiting for the user's design system choice reply.
+_pending_ds_choice: dict[str, float] = {}
+
+
+def _msg_ts(thread_line: str) -> float:
+    """Extract the UTC timestamp as a float from a '[YYYY-MM-DD HH:MM UTC] ...' thread line."""
+    match = re.match(r'\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) UTC\]', thread_line)
+    if not match:
+        return 0.0
+    return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc).timestamp()
+
+
+def _load_ds_choices() -> dict:
+    try:
+        with open(_DS_CHOICES_FILE) as f:
+            return json.load(f)
+    except OSError:
+        return {}
+
+
+def _save_ds_choice(channel_id: str, choice: str) -> None:
+    choices = _load_ds_choices()
+    choices[channel_id] = choice
+    with open(_DS_CHOICES_FILE, "w") as f:
+        json.dump(choices, f)
+
+
+async def _check_paper_design_system() -> bool:
+    """
+    Spawns a lightweight Claude call to check if a 'design_system' artboard
+    exists on the active Paper canvas. Returns True if found.
+    """
+    prompt = (
+        "Call get_basic_info. Check whether any artboard is named exactly "
+        "'design_system' (case-insensitive). Reply with only 'yes' or 'no'."
+    )
+    cmd = [
+        CLAUDE_BIN, "-p", prompt,
+        "--model", "claude-opus-4-6",
+        "--output-format", "stream-json",
+        "--verbose",
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=_claude_env(),
+    )
+    final_text = ""
+    async for raw_line in process.stdout:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "result":
+            final_text = event.get("result", "")
+    await process.wait()
+    return "yes" in final_text.lower()
+
+
 # ── Clients ───────────────────────────────────────────────────────────────────
 
 app = AsyncApp(token=SLACK_BOT_TOKEN)
@@ -91,14 +161,33 @@ After finishing, write a short recap for the Slack user. Format it as:
 Keep it brief and jargon-free. No mention of colours, fonts, or technical implementation details."""
 
 
-async def run_design_agent(thread: str, on_screenshot) -> str:
+async def run_design_agent(thread: str, on_screenshot, design_system_source: str = "none") -> str:
     """
     Spawns `claude -p <prompt>` as a subprocess with stream-json output.
     Parses the event stream to extract screenshots and the final text summary.
     Calls `on_screenshot(image_bytes, filename)` for every screenshot Claude produces.
+    design_system_source: "folder" | "artboard" | "none"
     Returns Claude's final text response.
     """
-    prompt = f"{DESIGN_SYSTEM_PROMPT}\n\n---\n\nSlack thread:\n{thread}"
+    if design_system_source == "folder":
+        ds_dir = os.path.join(PROJECT_ROOT, "design_system")
+        design_system_instruction = (
+            f"\n\n---\n\nDesign system: a design system exists at {ds_dir}. "
+            "Before designing, explore that directory to understand its tokens — "
+            "colours, typography, spacing, radius, and any other design decisions. "
+            "Apply those values consistently throughout your work."
+        )
+    elif design_system_source == "artboard":
+        design_system_instruction = (
+            "\n\n---\n\nDesign system: there is a 'design_system' artboard on the canvas. "
+            "Before designing, read its styles using get_computed_styles to extract all tokens — "
+            "colours, typography, spacing, radius, and any other design decisions. "
+            "Apply those values consistently throughout your work."
+        )
+    else:
+        design_system_instruction = ""
+
+    prompt = f"{DESIGN_SYSTEM_PROMPT}{design_system_instruction}\n\n---\n\nSlack thread:\n{thread}"
 
     cmd = [
         CLAUDE_BIN,
@@ -189,25 +278,28 @@ async def run_design_agent(thread: str, on_screenshot) -> str:
 
 async def detect_intent(thread: str) -> str:
     """
-    Lightweight Claude call that reads only the last user message and returns
+    Lightweight Claude call that reads the last few user messages and returns
     either 'design' or 'implement' — nothing else.
     """
-    # Extract the last user message from the thread for focused intent detection
-    last_user_line = ""
-    for line in reversed(thread.splitlines()):
-        if "[user]:" in line:
-            last_user_line = line.split("[user]:", 1)[-1].strip()
-            break
+    # Pass all user messages with timestamps so Claude can reason about recency
+    user_lines = [
+        line
+        for line in thread.splitlines()
+        if "[user]:" in line
+    ]
+    recent_messages = "\n".join(user_lines)
 
     prompt = (
-        "Classify the intent of this Slack message.\n\n"
+        "Classify the overall intent of a Slack conversation based on the user's messages below.\n"
+        "Each message includes a timestamp — use them to understand which messages are most recent.\n\n"
         "Reply with exactly one word:\n"
         "- 'design'     → the user wants to create or update a UI design\n"
         "- 'implement'  → the user wants to export, build, or deploy a design as a real webpage\n\n"
         "Examples of 'implement': implement, build, deploy, ship, export, make it real, create the webpage\n"
         "Examples of 'design': design, create, make, update, change, improve, add, redesign\n\n"
+        "The most recent messages carry the most weight.\n"
         "Only reply with the single word. No punctuation, no explanation.\n\n"
-        f"Message: {last_user_line}"
+        f"User messages:\n{recent_messages}"
     )
 
     cmd = [CLAUDE_BIN, "-p", prompt, "--model", "claude-opus-4-6"]
@@ -222,10 +314,10 @@ async def detect_intent(thread: str) -> str:
 
     # Guard against unexpected output — default to design
     if "implement" in intent:
-        logger.info("Intent detected: implement")
+        logger.info("Intent detected: implement (from: %s)", recent_messages.replace("\n", " | "))
         return "implement"
 
-    logger.info("Intent detected: design")
+    logger.info("Intent detected: design (from: %s)", recent_messages.replace("\n", " | "))
     return "design"
 
 
@@ -359,13 +451,13 @@ def scaffold_vite_project(project_dir: str) -> None:
 
 async def wire_navigation_agent(project_dir: str, component_names: list[str]) -> None:
     """
-    Claude generates App.jsx content; Python writes it to disk.
-    No MCP tools are needed here — it's pure code generation.
+    Claude generates and writes App.jsx directly to disk via its Write tool.
     """
     screens_list = "\n".join(f"- {name}" for name in component_names)
+    app_jsx_path = os.path.join(project_dir, "src", "App.jsx")
 
     prompt = (
-        "Write a React App.jsx file for a Vite project.\n\n"
+        f"Write a React App.jsx file to {app_jsx_path}.\n\n"
         f"The src/screens/ directory contains these components:\n{screens_list}\n\n"
         "Requirements:\n"
         "1. Import all screen components from ./screens/<name>\n"
@@ -374,11 +466,16 @@ async def wire_navigation_agent(project_dir: str, component_names: list[str]) ->
         "   so screens can link to each other (e.g. a login button navigates to Dashboard)\n"
         "4. Start on the first screen in the list\n"
         "5. Add an import for './index.css' at the top\n"
-        "6. The function MUST be declared as `export default function App()` — not a separate export statement\n\n"
-        "Reply with ONLY the raw file content — no markdown, no code fences, no explanation."
+        "6. Declare the function as `export default function App()`\n\n"
+        "Write the file, then confirm."
     )
 
-    cmd = [CLAUDE_BIN, "-p", prompt, "--model", "claude-opus-4-6"]
+    cmd = [
+        CLAUDE_BIN, "-p", prompt,
+        "--model", "claude-opus-4-6",
+        "--output-format", "stream-json",
+        "--verbose",
+    ]
 
     process = await asyncio.create_subprocess_exec(
         *cmd,
@@ -386,13 +483,20 @@ async def wire_navigation_agent(project_dir: str, component_names: list[str]) ->
         stderr=asyncio.subprocess.PIPE,
         env=_claude_env(),
     )
-    stdout, _ = await process.communicate()
-    code = stdout.decode("utf-8", errors="replace").strip()
 
-    app_jsx_path = os.path.join(project_dir, "src", "App.jsx")
-    with open(app_jsx_path, "w") as f:
-        f.write(code)
-    logger.info("App.jsx written (%d chars)", len(code))
+    async for raw_line in process.stdout:
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "tool_use":
+            logger.info("Nav agent → %s", event.get("name", "?"))
+
+    await process.wait()
+    logger.info("App.jsx written by Claude")
 
 
 async def deploy_to_vercel(project_dir: str) -> str:
@@ -522,7 +626,7 @@ async def handle_mention(event: dict, say, client):
     thread = "\n".join(thread_lines)
     logger.info("Thread sent to Claude:\n%s", thread)
 
-    await say(text=":thinking_face: Got it — figuring out what you need...", **reply_args)
+    await say(text=":thought_balloon: Got it, figuring out what you need...", **reply_args)
 
     # ── Detect intent ─────────────────────────────────────────────────────────
     intent = await detect_intent(thread)
@@ -561,7 +665,67 @@ async def handle_mention(event: dict, say, client):
         return
 
     # ── Design flow ───────────────────────────────────────────────────────────
-    await say(text=":pencil: On it! Generating your design...", **reply_args)
+
+    # ── Detect which design systems are available ─────────────────────────────
+    has_folder  = os.path.isdir(os.path.join(PROJECT_ROOT, "design_system"))
+    has_artboard = await _check_paper_design_system()
+    logger.info("Design systems — folder: %s, artboard: %s", has_folder, has_artboard)
+
+    # ── Case 4: both exist — ask the user (once per channel) ─────────────────
+    if has_folder and has_artboard:
+        choices = _load_ds_choices()
+        if channel in choices:
+            ds_source = choices[channel]
+            logger.info("Using remembered design system choice: %s", ds_source)
+        elif channel in _pending_ds_choice:
+            # User just replied — only consider messages sent after the bot's question
+            asked_at = _pending_ds_choice[channel]
+            last_user_msg = next(
+                (l.split("[user]:", 1)[-1].strip().lower()
+                 for l in reversed(thread_lines)
+                 if "[user]:" in l and _msg_ts(l) > asked_at),
+                ""
+            )
+            if any(w in last_user_msg for w in ("folder", "repo", "repository", "file")):
+                ds_source = "folder"
+            elif any(w in last_user_msg for w in ("artboard", "paper", "canvas")):
+                ds_source = "artboard"
+            else:
+                await say(
+                    text="Sorry, I didn't catch that. Please reply with *folder* (use the repo design system) or *artboard* (use the Paper canvas design system).",
+                    **reply_args,
+                )
+                return
+            del _pending_ds_choice[channel]
+            _save_ds_choice(channel, ds_source)
+            logger.info("Design system choice saved: %s", ds_source)
+        else:
+            # First time — ask and record when we asked
+            _pending_ds_choice[channel] = float(event["ts"])
+            await say(
+                text=(
+                    "I found a design system in two places: the *repository folder* and a *Paper canvas artboard*. "
+                    "Which one should I use for this channel going forward?\n\n"
+                    "Reply by mentioning me with *folder* or *artboard*."
+                ),
+                **reply_args,
+            )
+            return
+    elif has_folder:
+        ds_source = "folder"
+    elif has_artboard:
+        ds_source = "artboard"
+    else:
+        ds_source = "none"
+
+    if ds_source == "none":
+        design_msg = ":art: On it! Bringing your design to life..."
+    elif has_folder and has_artboard:
+        source_label = "repository" if ds_source == "folder" else "Paper canvas"
+        design_msg = f":art: On it! Building your design using your design system from the {source_label}..."
+    else:
+        design_msg = ":art: On it! Building your design using your design system..."
+    await say(text=design_msg, **reply_args)
 
     # ── Buffer screenshots — only the last one goes to Slack ─────────────────
     screenshot_buffer: list[tuple[bytes, str]] = []
@@ -572,7 +736,8 @@ async def handle_mention(event: dict, say, client):
 
     # ── Run the agent ─────────────────────────────────────────────────────────
     try:
-        summary = await run_design_agent(thread, collect_screenshot)
+        summary = await run_design_agent(thread, collect_screenshot, design_system_source=ds_source)
+        summary = re.sub(r'\*\*(.+?)\*\*', r'*\1*', summary)
 
         if screenshot_buffer:
             final_bytes, final_filename = screenshot_buffer[-1]

@@ -24,9 +24,10 @@ User mentions bot in Slack
         ▼
   server.py receives event
   fetches full thread history
+  posts: "Got it, figuring out what you need..."
         │
         ▼
-  detect_intent() ──── "design" ────────────────────────────────────┐
+  detect_intent()  ──── "design" ───────────────────────────────────┐
         │                                                            │
         │ "implement"                                                │
         ▼                                                            ▼
@@ -46,6 +47,27 @@ Slack mention
 server.py
   builds thread string
   (timestamps + [user]/[bot] labels)
+  detects intent → "design"
+     │
+     ▼
+Design system detection (runs in parallel before the agent starts)
+  ┌─────────────────────────────────────────────────────────────┐
+  │  has_folder  = does  ./design_system/  directory exist?     │
+  │  has_artboard = does Paper canvas have a "design_system"    │
+  │                 artboard? (lightweight Claude call)         │
+  └─────────────────────────────────────────────────────────────┘
+     │
+     ▼
+  ┌──────────────┬────────────────────────────────────────────────┐
+  │  neither     │ proceed with no design system                  │
+  │  folder only │ Claude explores ./design_system/ directory     │
+  │  artboard    │ Claude reads "design_system" artboard styles   │
+  │  only        │ via get_computed_styles                        │
+  │  both        │ check .design_system_choices.json for saved    │
+  │              │ channel preference; if none, ask user once     │
+  │              │ ("reply with 'folder' or 'artboard'"), save    │
+  │              │ answer, never ask again for this channel       │
+  └──────────────┴────────────────────────────────────────────────┘
      │
      ▼
 run_design_agent()
@@ -55,19 +77,24 @@ run_design_agent()
 Claude subprocess
   1. get_guide          → loads Paper working instructions
   2. get_basic_info     → reads canvas, existing artboards
-  3. write_html         → draws new elements (new designs)
+  [if design_system_source == "folder"]
+  3. explores ./design_system/ with Read/Glob tools
+  [if design_system_source == "artboard"]
+  3. get_computed_styles on "design_system" artboard → extracts tokens
+  4. write_html         → draws new elements (new designs)
      or
      update_styles      → edits existing elements (refinements)
      set_text_content   → edits text content
-  4. get_screenshot     → takes a snapshot to review work
-  5. finish_working_on_nodes → finalises the design
-  6. streams result back as JSON events
+  5. get_screenshot     → takes a snapshot to review work
+  6. finish_working_on_nodes → finalises the design
+  7. streams result back as JSON events
      │
      ▼
 server.py
   parses stream-json line by line
   buffers all screenshots
   captures final text summary
+  converts **bold** → *bold* for Slack formatting
      │
      ▼
 Slack
@@ -86,6 +113,7 @@ Slack mention
      │
      ▼
 server.py
+  detects intent → "implement"
   creates temp dir: builds/paper_design_<id>/
   scaffold_vite_project()
     writes: package.json, vite.config.js,
@@ -111,24 +139,17 @@ server.py
      │
      ▼
 wire_navigation_agent()
-  spawns: claude -p <prompt>  (no MCP tools — pure code generation)
+  spawns: claude -p <prompt> --output-format stream-json
      │
      ▼
 Claude subprocess
-  generates App.jsx with:
-    - imports for all screen components
-    - useState-based screen router
-    - navigate() prop passed to each screen
-  returns raw file content as text
-     │
-     ▼
-server.py
-  writes src/App.jsx to disk
+  writes App.jsx directly to builds/paper_design_<id>/src/App.jsx
+  with useState-based screen router and navigate() prop
      │
      ▼
 deploy_to_vercel()
   npm install
-  npm run build  (fails fast with error if JSX is broken)
+  npm run build  (fails fast locally if JSX is broken — logs App.jsx)
   npx vercel --yes --prod
      │
      ▼
@@ -141,6 +162,36 @@ Vercel
 Slack
   posts: ":rocket: Live at: https://..."
   cleans up temp build dir
+```
+
+---
+
+## Design system detection
+
+Runs on every design request. Four outcomes:
+
+| has_folder | has_artboard | Outcome |
+|------------|--------------|---------|
+| No | No | No design system — Claude designs freely |
+| Yes | No | Claude explores `./design_system/` directory |
+| No | Yes | Claude reads `design_system` artboard via `get_computed_styles` |
+| Yes | Yes | Ask user once per channel, save preference to `.design_system_choices.json` |
+
+The "both" case:
+- Preference is saved per channel in `.design_system_choices.json` (gitignored)
+- Persists across server restarts
+- Bot asks once, never again for that channel
+- User replies with `folder` or `artboard` (also accepts: `repo`, `repository`, `file`, `paper`, `canvas`)
+
+---
+
+## Intent detection
+
+Before either flow runs, a lightweight Claude call reads **all user messages** in the thread (with timestamps) and returns a single word: `design` or `implement`. Timestamps let Claude weight the most recent messages correctly.
+
+```
+"implement" / "deploy" / "build" / "ship" / "export"  →  implement flow
+"design" / "create" / "update" / "change" / "improve"  →  design flow
 ```
 
 ---
@@ -158,7 +209,7 @@ builds/
     └── src/
         ├── main.jsx            ← Python (scaffold)
         ├── index.css           ← Python (scaffold)
-        ├── App.jsx             ← Python (wire_navigation_agent output)
+        ├── App.jsx             ← Claude (wire_navigation_agent, Write tool)
         └── screens/
             ├── LoginScreen.jsx ← Claude (get_jsx + get_computed_styles)
             └── Dashboard.jsx   ← Claude (get_jsx + get_computed_styles)
@@ -169,22 +220,11 @@ builds/
 ## Who writes what
 
 | File | Written by | How |
-|------|-----------|-----|
+|------|------------|-----|
 | `package.json`, `vite.config.js`, `index.html`, `main.jsx`, `index.css` | Python | Hardcoded templates in `scaffold_vite_project()` |
-| `src/screens/*.jsx` | Claude subprocess | Via `Write` tool (MCP), using JSX from Paper |
-| `public/*.png` | Claude subprocess | Via `Write` tool (MCP), using base64 from `get_fill_image` |
-| `src/App.jsx` | Python | Claude generates content, Python writes the file |
-
----
-
-## Intent detection
-
-Before either flow runs, a lightweight Claude call reads only the **last user message** in the thread and returns a single word: `design` or `implement`. This avoids the full thread polluting the classification.
-
-```
-"implement this" / "deploy" / "build" / "ship"  →  implement flow
-"design" / "create" / "update" / "change"        →  design flow
-```
+| `src/screens/*.jsx` | Claude subprocess | Via `Write` tool, using JSX from Paper |
+| `public/*.png` | Claude subprocess | Via `Write` tool, using base64 from `get_fill_image` |
+| `src/App.jsx` | Claude subprocess | Via `Write` tool in `wire_navigation_agent` |
 
 ---
 
@@ -211,4 +251,19 @@ Every message in the Slack thread is passed to Claude formatted as:
 [2026-04-18 10:45 UTC] [user]: make the background darker
 ```
 
-Timestamps let Claude understand chronology. The most recent message is the active request; older ones are context.
+Timestamps let Claude understand chronology. The most recent message is the active request; older ones are context. System messages (joins, renames, deletions) are filtered out before sending.
+
+---
+
+## Slack messages sequence
+
+| Step | Message |
+|------|---------|
+| On every mention | `:thought_balloon: Got it, figuring out what you need...` |
+| Design (with design system) | `:art: On it! Building your design using your design system...` |
+| Design (no design system) | `:art: On it! Bringing your design to life...` |
+| Implement | `:hammer_and_wrench: On it! Exporting and deploying your design...` |
+| Both design systems found | Asks user to choose `folder` or `artboard` |
+| Design complete | Screenshot + summary with title and bullet points |
+| Implement complete | `:rocket: Live at: <url>` |
+| Any error | `:x: Something went wrong: <error>` |
