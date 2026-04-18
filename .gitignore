@@ -2,3 +2,4 @@
 .venv/
 builds/
 .design_system_choices.json
+.design_system/
