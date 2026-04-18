@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Write(builds/**)",
+      "Edit(builds/**)",
+      "Bash(mkdir -p builds/*)",
+      "Bash(npm install --prefix builds/*)",
+      "Bash(npm run build --prefix builds/*)",
+      "Bash(npx vercel *)"
+    ]
+  }
+}
