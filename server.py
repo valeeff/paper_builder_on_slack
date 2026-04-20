@@ -327,28 +327,44 @@ async def run_implement_agent(thread: str, project_dir: str) -> list[str]:
     """
     Claude identifies which artboards to implement from the thread,
     calls get_jsx on each, and writes .jsx files directly to src/screens/.
-    Returns the list of component names created (scanned from disk after Claude finishes).
+    Artboards are sorted left-to-right by their canvas position, which defines
+    the navigation order. Each screen receives `navigate` (forward) and
+    `navigateBack` (backward) props and has its CTA / back buttons wired up.
+    Returns the component names in canvas order (left to right).
     """
     screens_dir = os.path.join(project_dir, "src", "screens")
     public_dir  = os.path.join(project_dir, "public")
 
     prompt = (
-        "You are exporting UI designs from Paper as React components.\n\n"
+        "You are exporting UI designs from Paper as interactive React components.\n\n"
         "Read the Slack thread to understand which artboard(s) the user wants to implement. "
-        "If they say 'all' or 'everything', export every artboard on the canvas.\n\n"
+        "If they say 'all' or 'everything', export every artboard on the canvas "
+        "(excluding any artboard named 'design_system').\n\n"
         "Steps:\n"
-        "1. Call get_basic_info to list all artboards\n"
-        "2. Match the user's request to the correct artboard ID(s)\n"
-        "3. For each artboard:\n"
+        "1. Call get_basic_info to list all artboards.\n"
+        "2. Sort the target artboards by their `left` position ascending — "
+        "   this left-to-right canvas order is the navigation order.\n"
+        "3. For each artboard (in sorted order):\n"
         "   a. Call get_jsx with exportFormat 'inline-styles'\n"
         "   b. Call get_computed_styles on the artboard node and use the exact values "
         "      to override any approximate values in the JSX\n"
         "   c. Call get_fill_image on any nodes that have image or icon fills; "
         f"     write those as binary files into {public_dir}/\n"
-        f"   d. Write the final React component to {screens_dir}/<ComponentName>.jsx\n"
+        "   d. Add two props to the default-export function signature: "
+        "      `navigate` (go forward) and `navigateBack` (go back).\n"
+        "   e. Wire interactivity:\n"
+        "      - The PRIMARY forward action (the most prominent CTA button — "
+        "        e.g. 'Get Started', 'Continue', 'Next', 'Select', the last/bottom button) "
+        "        must call `onClick={() => navigate()}` — but ONLY if this is not the last screen.\n"
+        "      - The BACK element (a '<' chevron, back arrow SVG, or any element in the "
+        "        top-left header area that visually reads as a back control) "
+        "        must call `onClick={() => navigateBack()}` — but ONLY if this is not the first screen.\n"
+        "      - All other elements remain static.\n"
+        f"   f. Write the final React component to {screens_dir}/<ComponentName>.jsx\n"
         "4. Each component must be a valid default export React component.\n"
         "5. When all files are written, reply with ONLY the component names "
-        "   you created, one per line — no prose, no markdown, no file extensions.\n\n"
+        "   in canvas order (left to right), one per line — "
+        "   no prose, no markdown, no file extensions.\n\n"
         f"Slack thread:\n{thread}"
     )
 
@@ -458,15 +474,17 @@ async def wire_navigation_agent(project_dir: str, component_names: list[str]) ->
 
     prompt = (
         f"Write a React App.jsx file to {app_jsx_path}.\n\n"
-        f"The src/screens/ directory contains these components:\n{screens_list}\n\n"
+        f"The screens below are listed in navigation order (first → last):\n{screens_list}\n\n"
         "Requirements:\n"
         "1. Import all screen components from ./screens/<name>\n"
-        "2. Use React.useState to track which screen is currently shown\n"
-        "3. Pass a navigate(screenName) function as a prop to each screen\n"
-        "   so screens can link to each other (e.g. a login button navigates to Dashboard)\n"
-        "4. Start on the first screen in the list\n"
-        "5. Add an import for './index.css' at the top\n"
-        "6. Declare the function as `export default function App()`\n\n"
+        "2. Store them in an array called `screens` in the same order as the list above.\n"
+        "3. Use React.useState to track `currentIndex` (integer), starting at 0.\n"
+        "4. Define two navigation helpers:\n"
+        "   - `navigate`     → setCurrentIndex(i => Math.min(i + 1, screens.length - 1))\n"
+        "   - `navigateBack` → setCurrentIndex(i => Math.max(i - 1, 0))\n"
+        "5. Render only `screens[currentIndex]` and pass both `navigate` and `navigateBack` as props.\n"
+        "6. Add an import for './index.css' at the top.\n"
+        "7. Declare the function as `export default function App()`\n\n"
         "Write the file, then confirm."
     )
 
