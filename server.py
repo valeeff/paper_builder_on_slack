@@ -727,7 +727,7 @@ async def handle_mention(event: dict, say, client):
         design_msg = ":art: On it! Building your design using your design system..."
     await say(text=design_msg, **reply_args)
 
-    # ── Buffer screenshots — only the last one goes to Slack ─────────────────
+    # ── Buffer screenshots — all will be uploaded to Slack ───────────────────
     screenshot_buffer: list[tuple[bytes, str]] = []
 
     async def collect_screenshot(image_bytes: bytes, filename: str):
@@ -740,15 +740,15 @@ async def handle_mention(event: dict, say, client):
         summary = re.sub(r'\*\*(.+?)\*\*', r'*\1*', summary)
 
         if screenshot_buffer:
-            final_bytes, final_filename = screenshot_buffer[-1]
-            logger.info("Uploading final screenshot %s (%d bytes) to Slack", final_filename, len(final_bytes))
-            await client.files_upload_v2(
-                channel=channel,
-                filename=final_filename,
-                content=final_bytes,
-                title="Design preview",
-                **reply_args,
-            )
+            for img_bytes, img_filename in screenshot_buffer:
+                logger.info("Uploading screenshot %s (%d bytes) to Slack", img_filename, len(img_bytes))
+                await client.files_upload_v2(
+                    channel=channel,
+                    filename=img_filename,
+                    content=img_bytes,
+                    title="Design preview",
+                    **reply_args,
+                )
             await say(
                 text=f":white_check_mark: Done!\n\n{summary}".strip(),
                 **reply_args,
