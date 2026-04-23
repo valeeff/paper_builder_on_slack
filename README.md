@@ -1,8 +1,12 @@
 # Paper Builder on Slack
 
-An AI-powered design bot that listens for mentions in Slack and autonomously creates UI designs or deploys them as live web apps.
+Paper Builder is an AI agent that designs and deploys a product based on teammates' Slack messages, showing the results right inside the channel — in seconds for simple designs, minutes for full multi-screen deployments.
 
-It connects three systems: **Slack** (user interface), **Claude CLI with Paper MCP** (AI design agent), and **Vercel** (deployment).
+With Paper Builder you can design, refine, and deploy without leaving the Slack thread.
+
+From a single screen to entire flows.
+
+It is a multi-agent orchestrator, using a Python server and Claude CLI to create designs in Paper through its MCP, and generate a navigable live demo on Vercel.
 
 ---
 
@@ -34,8 +38,9 @@ Fetch thread history → detect_intent() → "design" or "implement"?
         │
         └── IMPLEMENT FLOW
               ├─ Scaffold a Vite + React project in builds/paper_design_<id>/
-              ├─ Claude exports artboards as JSX + images
-              ├─ Claude writes App.jsx with routing between artboards
+              ├─ Claude exports artboards as JSX + images, sorted left-to-right by canvas position
+              ├─ Each screen gets forward (navigate) and back (navigateBack) props wired to CTAs
+              ├─ Claude writes App.jsx with useState-based index navigation
               ├─ npm install → npm run build → npx vercel --prod
               └─ Post live URL to Slack thread
 ```
@@ -64,75 +69,81 @@ Before running the design agent, the bot checks for a design system to guide Cla
 
 ---
 
-## Prerequisites
+## Step-by-Step Setup
 
-- Python 3.8+
-- [Claude Code CLI](https://claude.ai/code) installed and authenticated (`claude` on your PATH)
-- Paper desktop app running with MCP server enabled
-- Vercel CLI: `npm install -g vercel` (and logged in via `vercel login`)
-- A Slack app with Socket Mode enabled (see below)
+Follow these steps exactly to get your Paper Builder bot running.
 
----
-
-## Setup
-
-### 1. Clone and create a virtual environment
+### 1. Clone the repository
+First, download the code to your machine and install the Python requirements. The final command below will create a hidden `.env` file. This is a secure configuration file where all your private API keys and tokens will live so they aren't accidentally shown in your code.
 
 ```bash
+# Clone the repository
+git clone https://github.com/YOUR_USERNAME/paper_builder_on_slack.git
 cd paper_builder_on_slack
+
+# Setup a Python virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
 
-### 2. Configure environment variables
-
-```bash
+# Create your settings file
 cp .env.example .env
 ```
 
-Edit `.env` with your credentials:
+### 2. Set up Claude
+The bot uses the Claude CLI to power its agent logic. There are two ways to authenticate:
 
-```env
-# Slack — from api.slack.com/apps
-SLACK_BOT_TOKEN=xoxb-...
-SLACK_APP_TOKEN=xapp-...
+**Option A — Claude Pro subscription (no API key needed)**
+If you have a Claude Pro account, the CLI will use it automatically after login. No API key is required.
 
-# Anthropic — from console.anthropic.com
-ANTHROPIC_API_KEY=sk-ant-...
+**Option B — Anthropic API key (pay-per-use)**
+If you want to use API billing instead:
+1. Get an API key from the [Anthropic Console](https://console.anthropic.com).
+2. Paste it into your `.env` file as `ANTHROPIC_API_KEY=sk-ant-...`
 
-# Optional: path to the claude binary if not on your PATH
-# CLAUDE_BIN=/usr/local/bin/claude
-```
+**Both options:**
+1. Install the Claude CLI by running: `npm install -g @anthropic-ai/claude-code`
+2. Log into the Claude CLI by running: `claude login`
 
-### 3. Create the Slack app
+### 3. Setup the Paper Desktop App
+Claude needs the Paper app to actually draw the designs. First, ensure the **MCP Server** (Model Context Protocol) is enabled in your Paper app settings.
 
-1. Go to [api.slack.com/apps](https://api.slack.com/apps) and create a new app.
-2. Under **Socket Mode**, enable it and generate an **App-Level Token** (`xapp-...`). Add the `connections:write` scope.
-3. Under **OAuth & Permissions**, add these **Bot Token Scopes**:
+Next, install the Paper plugin into the **Claude Code CLI** — this is the `claude` binary that `server.py` invokes as a subprocess. The plugin must be installed in the CLI, not in Claude Desktop or any other interface.
+
+**Install the Paper plugin in Claude Code CLI:**
+1. Add the custom marketplace: `/plugin marketplace add paper-design/agent-plugins`
+2. Install the plugin: `/plugin install paper-desktop@paper`
+
+*Once connected, you should see the Paper MCP server in the list of available MCPs when you run the `/mcp` command in your terminal.*
+
+### 4. Setup Vercel for Deployments
+Vercel is used to host your generated React applications.
+
+1. Install the Vercel CLI by running: `npm install -g vercel`
+2. Log into Vercel via your terminal by running: `vercel login`
+
+### 5. Create your Slack App
+You need a bot in Slack for your team to talk to.
+
+1. Create a new app at [api.slack.com/apps](https://api.slack.com/apps).
+2. Go to **Socket Mode** and enable it. Copy the **App-Level Token** (`xapp-...`) to your `.env` file as `SLACK_APP_TOKEN=`.
+3. Go to **Socket Mode** settings and add the `connections:write` scope.
+4. Under **OAuth & Permissions**, add these **Bot Token Scopes**:
    - `app_mentions:read`
    - `channels:history`
    - `chat:write`
    - `files:write`
-4. Install the app to your workspace and copy the **Bot User OAuth Token** (`xoxb-...`).
-5. Under **Event Subscriptions → Subscribe to bot events**, add `app_mention`.
+5. Install the app to your workspace. Copy the **Bot User OAuth Token** (`xoxb-...`) to your `.env` file as `SLACK_BOT_TOKEN=`.
+6. Under **Event Subscriptions** → **Subscribe to bot events**, add `app_mention`.
 
-### 4. (Optional) Set up the reference design system
-
-```bash
-cd design_system
-npm install
-cd ..
-```
-
-### 5. Start the bot
+### 6. Start the bot!
+Everything is connected. Make sure the Paper app is open and on a new canvas page, then run:
 
 ```bash
 python server.py
 ```
 
 You should see:
-
 ```
 Paper Builder on Slack is running (Socket Mode).
 Using claude binary: claude
@@ -142,12 +153,17 @@ Using claude binary: claude
 
 ## Usage
 
-Mention the bot in any Slack channel:
+You can use simple standalone requests, or you can have a normal conversation with your team in a Slack thread and simply tag the bot at the very end. 
 
-```
+Paper Builder reads the entire thread history, so it automatically understands the context of your team's discussion without you needing to write a massive, detailed prompt.
+
+```text
 @paper-builder design a login screen with email and password fields
 @paper-builder update the button colors to match our brand
 @paper-builder implement this design
+
+(Or, at the end of a team brainstorming thread):
+@paper-builder can you create this flow based on our ideas above?
 ```
 
 - Design results are posted as screenshots in the thread.
@@ -160,6 +176,5 @@ Mention the bot in any Slack channel:
 
 ```
 slack-bolt>=1.21.0    # Slack API client with Socket Mode
-aiohttp>=3.9.0        # Async HTTP
 python-dotenv>=1.0.0  # Load .env
 ```
