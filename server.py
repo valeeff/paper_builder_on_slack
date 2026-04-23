@@ -152,7 +152,9 @@ Paper workflow:
    - For EDITS to existing designs (colour changes, text updates, style tweaks):
      prefer update_styles and set_text_content over rewriting with write_html.
      Only use write_html when adding entirely new elements.
-4. Call get_screenshot during the process to review your work.
+4. Call get_screenshot to review your work, but ALWAYS pass the node ID of the specific
+   artboard you just created or modified — never screenshot the full canvas.
+   This ensures the preview shows only the new or changed design, not pre-existing artboards.
 5. Call finish_working_on_nodes when the design is complete.
 
 After finishing, write a short recap for the Slack user. Format it as:
