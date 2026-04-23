@@ -1,6 +1,6 @@
 # Paper Builder on Slack
 
-Paper Builder is an AI agent that designs and deploys a product based on teammates' Slack messages, showing the results right inside the channel — in seconds for simple designs, minutes for full multi-screen deployments.
+Paper Builder is an AI agent that designs and deploys a product based on teammates' Slack messages, showing the results right inside the channel.
 
 With Paper Builder you can design, refine, and deploy without leaving the Slack thread.
 
